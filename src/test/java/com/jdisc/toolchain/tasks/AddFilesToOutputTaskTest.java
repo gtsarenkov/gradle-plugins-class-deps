@@ -88,7 +88,7 @@ public class AddFilesToOutputTaskTest {
         project.getLayout().getBuildDirectory().set(buildDir);
         Set<File> resolved = project.getConfigurations().detachedConfiguration(deps).resolve();
         addFilesToOutputTask = project.getTasks().create("addFilesToOutputTask", AddFilesToOutputTask.class);
-        addFilesToOutputTask.getClasspath().setFrom(resolved);
+        addFilesToOutputTask.getClasspath().set(project.files(resolved));
         logger = addFilesToOutputTask.getLogger();
         resolved.forEach(component -> logger.debug("Resolved class path Jars {}", component.getAbsolutePath()));
         //logger.lifecycle("DDDDDDDDDDDDDD {} {}", buildDir.toPath(), addFilesToOutputTask.getClasspath().getAsPath());

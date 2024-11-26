@@ -4,6 +4,7 @@ import com.jdisc.toolchain.ResolutionResult
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.FileCollection
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.provider.Provider
@@ -52,7 +53,7 @@ class AddFilesToOutputTask extends DefaultTask {
 
     @InputFiles
     @PathSensitive(PathSensitivity.RELATIVE)
-    final ConfigurableFileCollection classpath = project.objects.fileCollection()
+    final Property<FileCollection> classpath = project.objects.property(FileCollection.class).convention(project.objects.fileCollection())
 
     @OutputDirectories
     final ConfigurableFileCollection outputDirs = project.objects.fileCollection()
@@ -72,10 +73,10 @@ class AddFilesToOutputTask extends DefaultTask {
 
     @TaskAction
     void addFiles() {
-        if (classpath.isEmpty()) {
-            throw new GradleException("Lookup classpath for task ${getName()} must not be empty")
+        if (!classpath.present || classpath.get().isEmpty()) {
+            throw new GradleException("Lookup classpath for task ${getName()} must be non-empty")
         }
-        classpath.each { it -> logger.info("${getName()}:${it.exists() ?: ' not'} exists lookup classpath: ${it.absolutePath}") }
+        classpath.get().each { it -> logger.info("${getName()}:${it.exists() ?: ' not'} exists lookup classpath: ${it.absolutePath}") }
         Set<ResolutionResult> classFileData = findClassFiles([mainClass.get()] + this.classes.get())
         Set<ResolutionResult> resolvedFiles = resolveImportedClasses(classFileData)
 
@@ -92,7 +93,7 @@ class AddFilesToOutputTask extends DefaultTask {
             String className = classNameEnc.replaceAll(regex, '')
             boolean notFound = true
             String classFilePath = className.replace('.', '/') + ".class"
-            classpath.findAll { file -> !outputDirs.contains(file) }.each { file ->
+            classpath.get().findAll { file -> !outputDirs.contains(file) }.forEach { File file ->
                 if (file.isDirectory()) {
                     File potentialFile = new File(file, classFilePath)
                     if (potentialFile.exists() && !isExcluded(potentialFile)) {
@@ -109,9 +110,9 @@ class AddFilesToOutputTask extends DefaultTask {
             }
             if (notFound) {
                 if (ignoreMissingClassFile) {
-                    logger.warn(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.asPath))
+                    logger.warn(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.get().asPath))
                 } else {
-                    logger.error(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.asPath))
+                    logger.error(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.get().asPath))
                     throw new GradleException(MessageFormat.format("Class file {0} cannot be found", classFilePath))
                 }
             }
@@ -256,7 +257,7 @@ class AddFilesToOutputTask extends DefaultTask {
     }
 
     protected void processOutputFiles(Set<ResolutionResult> resolvedFiles) {
-        Set<File> jarsInClasspath = classpath.files.findAll { it.name.endsWith('.jar') }
+        Set<File> jarsInClasspath = classpath.get().files.findAll { it.name.endsWith('.jar') }
         Set<String> usedClasses = resolvedFiles.collect { it.file.name.replace('.class', '').replace('/', '.') }
 
         jarsInClasspath.each { jarFile ->
