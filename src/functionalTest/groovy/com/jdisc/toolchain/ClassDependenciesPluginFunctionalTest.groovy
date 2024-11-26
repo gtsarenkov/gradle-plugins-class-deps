@@ -68,11 +68,7 @@ tasks.register("greeting", AddFilesToOutputTask) {
 
         then:
         result.output.contains("Hello from plugin 'com.jdisc.toolchain.class-dependencies'")
-
-        then:
         result.task(':greeting').outcome == SUCCESS
-
-        then:
         new File(projectDir, "build/out/com/jdisc/toolchain/tasks/AddFilesToOutputTaskTest.class").exists()
     }
 }

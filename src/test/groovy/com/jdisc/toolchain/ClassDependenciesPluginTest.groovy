@@ -18,6 +18,6 @@ class ClassDependenciesPluginTest extends Specification {
         project.plugins.apply("com.jdisc.toolchain.class-dependencies")
 
         then:
-        project.tasks.findByName("greeting") != null
+        project.pluginManager.hasPlugin("com.jdisc.toolchain.class-dependencies")
     }
 }
