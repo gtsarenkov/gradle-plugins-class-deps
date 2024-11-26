@@ -36,7 +36,9 @@ plugins {
 }
 
 configurations {
-  classpath
+  classpath {
+    canBeResolved = true
+  }
 }
 
 dependencies {
@@ -47,7 +49,7 @@ import com.jdisc.toolchain.tasks.AddFilesToOutputTask
 
 tasks.register("greeting", AddFilesToOutputTask) {
     mainClass = 'com.jdisc.toolchain.tasks.AddFilesToOutputTaskTest'
-    classpath = files(project.findProperty("classpathDir").split(';')) + configurations.classpath
+    classpath = files().from(project.findProperty("classpathDir").split(';'), configurations.classpath)   
     outputDirs = files(project.layout.buildDirectory.dir("out").get().asFile)
     excludePatterns = ['**/.class', '**/*.java', '**/Thumbs.db', '**/*.mkd', '**/*.md', '**/*.css', 'com/gitblit/wicket/**', 'org/codehaus/groovy/**']
     ignoreMissingClassFile = true
