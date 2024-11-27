@@ -15,8 +15,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.*
 
-import java.nio.file.FileSystems
-import java.nio.file.PathMatcher
+import java.nio.file.*
 import java.text.MessageFormat
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -63,6 +62,9 @@ class AddFilesToOutputTask extends DefaultTask {
     @Input
     final Property<Boolean> ignoreMissingClassFile = project.objects.property(Boolean.class).convention(false)
 
+    @Input
+    final Property<Boolean> analyzeJarClasses = project.objects.property(Boolean).convention(true)
+
     @Optional
     @OutputFile
     final RegularFileProperty cacheFileName = project.objects.fileProperty()
@@ -70,7 +72,8 @@ class AddFilesToOutputTask extends DefaultTask {
     @OutputDirectories
     final ConfigurableFileCollection outputDirs = project.objects.fileCollection()
 
-    @OutputFiles
+//    @OutputFiles
+    @Internal
     final ConfigurableFileCollection outputJars = project.objects.fileCollection()
 
     private Comparator<File> classpathSortComparator = (File f1, File f2) -> {
@@ -116,12 +119,14 @@ class AddFilesToOutputTask extends DefaultTask {
 
         processOutputFiles(resolvedFiles)
 
+        logger.lifecycle("Found ${outputJars.collect {it.size() }.sum()} bytes in jar artifacts")
+
         outputJars.each {
             logger.info "----- Artifact Dependency Jar ${it}"
         }
     }
 
-    protected Set<ResolutionResult> findClassFiles(Collection<String> classNames, Set<File> trackedJars,  Map<String, File> classMap) {
+    protected Set<ResolutionResult> findClassFiles(Collection<String> classNames, Set<File> trackedJars, Map<String, File> classMap) {
         Set<ResolutionResult> classFileData = new HashSet<>()
         Set<File> jarFiles = sortedClasspathFileTree()
         def regex = /^(\[L)|(;$)|(\[]$)/
@@ -142,7 +147,10 @@ class AddFilesToOutputTask extends DefaultTask {
                     try (ZipFile zipFile = new ZipFile(file)) {
                         ZipEntry zipEntry = zipFile.getEntry(className.replace('.', '/') + ".class")
                         if (zipEntry != null && !isExcluded(zipEntry)) {
-                            // TODO: asdf
+                            if (analyzeJarClasses.get()) {
+                                logger.debug("Found class ${className} in jar ${file.absolute}")
+                                classFileData.add(new ResolutionResult(className, file, zipEntry, zipEntry.name))
+                            }
                             jarFiles.add(file)
                             notFound = false
                         }
@@ -150,8 +158,8 @@ class AddFilesToOutputTask extends DefaultTask {
                 }
             }
 
-            if (notFound) {
-                handleMissingClassFile(className, classpath)
+            if (notFound && !isExcludedClass(className)) {
+                handleMissingClassFile(className, classNameMangled)
             }
         }
 
@@ -161,12 +169,12 @@ class AddFilesToOutputTask extends DefaultTask {
         return classFileData
     }
 
-    protected void handleMissingClassFile(String className, Property<FileCollection> classpath) {
+    protected void handleMissingClassFile(String className, String originClassName) {
         if (ignoreMissingClassFile) {
-            logger.warn(MessageFormat.format("Class file {0} cannot be found in {1}", className, classpath.get().asPath))
+            logger.warn(MessageFormat.format("Class file {0} cannot be resolved from {1}", className, originClassName))
         } else {
-            logger.error(MessageFormat.format("Class file {0} cannot be found in {1}", className, classpath.get().asPath))
-            throw new GradleException(MessageFormat.format("Class file {0} cannot be found", className))
+            logger.error(MessageFormat.format("Class file {0} cannot be resolved from {1}", className, originClassName))
+            throw new GradleException(MessageFormat.format("Class file {0} cannot be resolved from {1}", className, originClassName))
         }
     }
 
@@ -182,7 +190,12 @@ class AddFilesToOutputTask extends DefaultTask {
                 if (!resolvedFiles.contains(result)) {
                     resolvedFiles.add(result)
 
-                    Set<String> importedClasses = findImportedClasses(result.file)
+                    URL url = result.file.toURL();
+
+                    Set<String> importedClasses
+                    try (InputStream is = url.openStream()) {
+                        importedClasses = findImportedClasses(is)
+                    }
                     Set<ResolutionResult> resolvedImportedFiles = findClassFiles(importedClasses, trackedJars, classMap)
 
                     newClasses.addAll(resolvedImportedFiles.findAll { !resolvedFiles.contains(it) })
@@ -193,7 +206,7 @@ class AddFilesToOutputTask extends DefaultTask {
         return resolvedFiles
     }
 
-    protected Set<String> findImportedClasses(File classFile) {
+    protected Set<String> findImportedClasses(InputStream classFile) {
         ClassNode classNode = new ClassNode()
         ClassReader classReader = new ClassReader(classFile.bytes)
         classReader.accept(classNode, 0)
@@ -301,33 +314,58 @@ class AddFilesToOutputTask extends DefaultTask {
     }
 
     protected void processOutputFiles(Set<ResolutionResult> resolvedFiles) {
-        Set<String> usedClasses = resolvedFiles.collect { it.file.name.replace('.class', '').replace('/', '.') }
+        Set<String> usedClasses = resolvedFiles.collect { it.canonicalClassName }
 
         logger.debug("----- Used classes found ${usedClasses.join(",")}")
 
-        Set<File> jarsInClasspath = classpath.get().files.findAll { it.name.endsWith('.jar') }.findAll { jarFile ->
-            def usedJar
-            try (ZipFile zipFile = new ZipFile(jarFile)) {
-                usedJar = zipFile.entries().any { entry -> usedClasses.contains(entry.name.replace('.class', '').replace('/', '.')) }
-            }
-            usedJar
-        }
+//        Set<File> jarsInClasspath = classpath.get().files.findAll { it.name.endsWith('.jar') }.findAll { jarFile ->
+//            def usedJar
+//            try (ZipFile zipFile = new ZipFile(jarFile)) {
+//                usedJar = zipFile.entries().any { entry -> usedClasses.contains(entry.name.replace('.class', '').replace('/', '.')) }
+//            }
+//            usedJar
+//        }
 
-        jarsInClasspath.each { outputJars.from(it) }
+        //jarsInClasspath.each { outputJars.from(it) }
+        def dd = new TreeSet(classpathSortComparator)
+        dd.addAll(resolvedFiles.findAll { !it.baseFile.directory }.collect { it.baseFile })
+        outputJars.from(dd)
 
         outputDirs.each { dir ->
             resolvedFiles.each { result ->
-                if (result.file.exists()) {
+                def classExists = result.file.getScheme().equals("file") && Files.exists(Paths.get(result.file))
+                if (classExists) {
                     def relativePath = result.relativePath
+
                     project.copy {
                         from result.file
                         into new File(dir, relativePath).parentFile
                     }
-                } else {
-                    logger.lifecycle("File does not exist: ${result.file}")
+                } else if (!doesFileExist(result.file)) {
+                    logger.warn("File does not exist: ${result.file}")
                 }
             }
         }
+    }
+
+    static boolean doesFileExist(URI uri) throws IOException, URISyntaxException {
+        if (uri.getScheme().equals("jar")) {
+            // Handle jar:file URI
+            try (FileSystem fs = FileSystems.newFileSystem(uri, Collections.emptyMap())) {
+                String[] parts = uri.toString().split("!/");
+                if (parts.length == 2) {
+                    Path pathInJar = fs.getPath(parts[1]);
+                    return Files.exists(pathInJar);
+                }
+            }
+        } else if (uri.getScheme().equals("file")) {
+            // Handle file URI
+            Path path = Paths.get(uri);
+            return Files.exists(path);
+        } else {
+            throw new IllegalArgumentException("Unsupported URI scheme: " + uri.getScheme());
+        }
+        return false;
     }
 
     /**
@@ -346,7 +384,7 @@ class AddFilesToOutputTask extends DefaultTask {
                     }
                 }
             } else if (entry.name.endsWith('.jar')) {
-                try(ZipFile zipFile = new ZipFile(entry)) {
+                try (ZipFile zipFile = new ZipFile(entry)) {
                     zipFile.entries().each { zipEntry ->
                         if (zipEntry.name.endsWith('.class')) {
                             String className = getClassNameFromZipEntry(zipEntry.name)

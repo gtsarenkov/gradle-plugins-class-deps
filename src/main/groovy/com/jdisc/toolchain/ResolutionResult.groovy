@@ -1,17 +1,24 @@
 package com.jdisc.toolchain
 
-import java.io.File
+import java.util.zip.ZipEntry
 
 class ResolutionResult implements Comparable<ResolutionResult> {
     final String canonicalClassName;
     final File baseFile
-    final File file
+    final URI file
     final String relativePath
 
-    ResolutionResult(String canonicalClassName, File baseFile, File file, String relativePath) {
+    ResolutionResult(String canonicalClassName, File baseDir, File file, String relativePath) {
         this.canonicalClassName = canonicalClassName
-        this.baseFile = baseFile
-        this.file = file
+        this.baseFile = baseDir
+        this.file = file.toURI()
+        this.relativePath = relativePath
+    }
+
+    ResolutionResult(String canonicalClassName, File jarFile, ZipEntry file, String relativePath) {
+        this.canonicalClassName = canonicalClassName
+        this.baseFile = jarFile
+        this.file = new URI("jar:file:" + jarFile.toPath().toUri().getPath() + "!/" + file.name)
         this.relativePath = relativePath
     }
 
