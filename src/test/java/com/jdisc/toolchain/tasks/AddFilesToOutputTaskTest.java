@@ -122,7 +122,8 @@ public class AddFilesToOutputTaskTest {
         ClassFilter classFilter = new ClassFilter(new org.moxie.ant.Logger(mockAntProject));
         Set<String> dependencies = expectedDependencies.stream().filter(classFilter::include).map(s -> s.replaceAll("^\\[L(.*?);?$", "$1").replace("/", ".")).filter(name -> name.startsWith("com.gitblit")).collect(Collectors.toSet());
         dependencies.add("com.gitblit.FederationClient"); // This is known difference.
-        Set<ResolutionResult> importedClassesResult = addFilesToOutputTask.resolveImportedClasses(new TreeSet<>(Set.of(new ResolutionResult("com.gitblit.FederationClient", new File("../build-gradled"), probeFile, "com/gitblit/FederationClient"))));
+        Set<File> trackedJars = new TreeSet<>();
+        Set<ResolutionResult> importedClassesResult = addFilesToOutputTask.resolveImportedClasses(new TreeSet<>(Set.of(new ResolutionResult("com.gitblit.FederationClient", new File("../build-gradled"), probeFile, "com/gitblit/FederationClient"))), trackedJars);
         Set<String> importedClasses = importedClassesResult.stream().map(ResolutionResult::getCanonicalClassName).collect(Collectors.toSet());
 //        if (!importedClasses.equals(dependencies)) {
 //            Set<String> union = new TreeSet(importedClasses);

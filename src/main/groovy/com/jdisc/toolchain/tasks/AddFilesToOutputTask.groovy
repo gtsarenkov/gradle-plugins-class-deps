@@ -1,13 +1,14 @@
 package com.jdisc.toolchain.tasks
 
 import com.jdisc.toolchain.ResolutionResult
+import groovy.json.JsonOutput
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.FileCollection
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
-import org.gradle.api.provider.Provider
 import org.gradle.api.provider.SetProperty
 import org.gradle.api.tasks.*
 import org.objectweb.asm.ClassReader
@@ -41,6 +42,8 @@ class AddFilesToOutputTask extends DefaultTask {
 
             "groovy.",
 
+            "module-info",
+
             "boolean",
             "byte",
             "char",
@@ -51,12 +54,8 @@ class AddFilesToOutputTask extends DefaultTask {
             "double"
     ))
 
-    @InputFiles
-    @PathSensitive(PathSensitivity.RELATIVE)
+    @Classpath
     final Property<FileCollection> classpath = project.objects.property(FileCollection.class).convention(project.objects.fileCollection())
-
-    @OutputDirectories
-    final ConfigurableFileCollection outputDirs = project.objects.fileCollection()
 
     @Input
     final ListProperty<String> excludePatterns = project.objects.listProperty(String)
@@ -64,11 +63,32 @@ class AddFilesToOutputTask extends DefaultTask {
     @Input
     final Property<Boolean> ignoreMissingClassFile = project.objects.property(Boolean.class).convention(false)
 
-    private final Provider<ConfigurableFileCollection> outputFiles = project.provider { project.objects.fileCollection() }
+    @Optional
+    @OutputFile
+    final RegularFileProperty cacheFileName = project.objects.fileProperty()
+
+    @OutputDirectories
+    final ConfigurableFileCollection outputDirs = project.objects.fileCollection()
 
     @OutputFiles
-    Provider<ConfigurableFileCollection> getOutputFiles() {
-        return outputFiles
+    final ConfigurableFileCollection outputJars = project.objects.fileCollection()
+
+    private Comparator<File> classpathSortComparator = (File f1, File f2) -> {
+        if ((f1.directory || !f1.name.endsWith(".jar")) && (!f2.directory || f1.name.endsWith(".jar"))) {
+            return 1
+        } else if ((!f1.directory || f1.name.endsWith(".jar")) && (f2.directory || !f1.name.endsWith(".jar"))) {
+            return -1
+        } else {
+            return f1.name <=> f2.name
+        }
+    }
+
+    TreeSet<File> sortedClasspathFileTree() {
+        return new TreeSet<>(classpathSortComparator)
+    }
+
+    static Boolean isAcceptableClasspathEntry(File file) {
+        return file.exists() && file.directory || file.name.endsWith(".jar")
     }
 
     @TaskAction
@@ -76,57 +96,81 @@ class AddFilesToOutputTask extends DefaultTask {
         if (!classpath.present || classpath.get().isEmpty()) {
             throw new GradleException("Lookup classpath for task ${getName()} must be non-empty")
         }
-        classpath.get().each { it -> logger.info("${getName()}:${it.exists() ?: ' not'} exists lookup classpath: ${it.absolutePath}") }
-        Set<ResolutionResult> classFileData = findClassFiles([mainClass.get()] + this.classes.get())
-        Set<ResolutionResult> resolvedFiles = resolveImportedClasses(classFileData)
+        Set<File> missingClasspath = sortedClasspathFileTree()
+        missingClasspath.addAll(classpath.get().files.findAll { !isAcceptableClasspathEntry(it) })
+        if (!missingClasspath.empty) {
+            missingClasspath.each {
+                logger.error(MessageFormat.format("Non-existing or invalid classpath entry detected: {}", it.absolutePath))
+            }
+            throw new GradleException(MessageFormat.format("Non-existing or invalid classpath entry detected: {}", missingClasspath.findAll { true }.absolutePath))
+        }
+
+        Map<String, File> classMap = buildClassMap()
+        if (cacheFileName.present) {
+            saveClassMapToFile(classMap, cacheFileName.get().asFile)
+        }
+
+        Set<File> trackedJars = [] as Set<File>
+        Set<ResolutionResult> classFileData = findClassFiles([mainClass.get()] + this.classes.get(), trackedJars, classMap)
+        Set<ResolutionResult> resolvedFiles = resolveImportedClasses(classFileData, trackedJars, classMap)
 
         processOutputFiles(resolvedFiles)
+
+        outputJars.each {
+            logger.info "----- Artifact Dependency Jar ${it}"
+        }
     }
 
-    protected Set<ResolutionResult> findClassFiles(Collection<String> classNames) {
+    protected Set<ResolutionResult> findClassFiles(Collection<String> classNames, Set<File> trackedJars,  Map<String, File> classMap) {
         Set<ResolutionResult> classFileData = new HashSet<>()
-        Set<File> jarFiles = new TreeSet<>()
+        Set<File> jarFiles = sortedClasspathFileTree()
         def regex = /^(\[L)|(;$)|(\[]$)/
 
-        classNames.each { classNameEnc ->
-            // Strip JVM internal class name mangling
-            String className = classNameEnc.replaceAll(regex, '')
+        classNames.each { classNameMangled ->
+            def className = classNameMangled.replaceAll(regex, "")
             boolean notFound = true
-            String classFilePath = className.replace('.', '/') + ".class"
-            classpath.get().findAll { file -> !outputDirs.contains(file) }.forEach { File file ->
-                if (file.isDirectory()) {
-                    File potentialFile = new File(file, classFilePath)
+
+            if (classMap.containsKey(className)) {
+                File file = classMap.get(className)
+                if (file.directory) {
+                    File potentialFile = new File(file, className.replace('.', '/') + ".class")
                     if (potentialFile.exists() && !isExcluded(potentialFile)) {
                         classFileData.add(new ResolutionResult(className, file, potentialFile, potentialFile.path - file.path))
                         notFound = false
                     }
-                } else if (file.name.endsWith('.jar')) {
-                    ZipFile zipFile = new ZipFile(file)
-                    if (zipFile.entries().any { ZipEntry entry -> entry.name == classFilePath && !isExcluded(entry) }) {
-                        jarFiles.add(file)
-                        notFound = false
+                } else if (file.name.endsWith(".jar")) {
+                    try (ZipFile zipFile = new ZipFile(file)) {
+                        ZipEntry zipEntry = zipFile.getEntry(className.replace('.', '/') + ".class")
+                        if (zipEntry != null && !isExcluded(zipEntry)) {
+                            // TODO: asdf
+                            jarFiles.add(file)
+                            notFound = false
+                        }
                     }
                 }
             }
+
             if (notFound) {
-                if (ignoreMissingClassFile) {
-                    logger.warn(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.get().asPath))
-                } else {
-                    logger.error(MessageFormat.format("Class file {0} cannot be found in {1}", classFilePath, classpath.get().asPath))
-                    throw new GradleException(MessageFormat.format("Class file {0} cannot be found", classFilePath))
-                }
+                handleMissingClassFile(className, classpath)
             }
         }
 
-        jarFiles.each { file -> outputFiles.get().from(file) }
-
-        classFileData.removeAll { result -> outputFiles.get().contains(result.file) }
+        trackedJars.addAll(jarFiles)
+        classFileData.removeAll { result -> trackedJars.contains(result.file) }
 
         return classFileData
     }
 
+    protected void handleMissingClassFile(String className, Property<FileCollection> classpath) {
+        if (ignoreMissingClassFile) {
+            logger.warn(MessageFormat.format("Class file {0} cannot be found in {1}", className, classpath.get().asPath))
+        } else {
+            logger.error(MessageFormat.format("Class file {0} cannot be found in {1}", className, classpath.get().asPath))
+            throw new GradleException(MessageFormat.format("Class file {0} cannot be found", className))
+        }
+    }
 
-    protected Set<ResolutionResult> resolveImportedClasses(Set<ResolutionResult> classFileData) {
+    protected Set<ResolutionResult> resolveImportedClasses(Set<ResolutionResult> classFileData, Set<File> trackedJars, Map<String, File> classMap) {
         Set<ResolutionResult> resolvedFiles = new TreeSet()
         Set<ResolutionResult> newClasses = new TreeSet(classFileData)
 
@@ -139,7 +183,7 @@ class AddFilesToOutputTask extends DefaultTask {
                     resolvedFiles.add(result)
 
                     Set<String> importedClasses = findImportedClasses(result.file)
-                    Set<ResolutionResult> resolvedImportedFiles = findClassFiles(importedClasses)
+                    Set<ResolutionResult> resolvedImportedFiles = findClassFiles(importedClasses, trackedJars, classMap)
 
                     newClasses.addAll(resolvedImportedFiles.findAll { !resolvedFiles.contains(it) })
                 }
@@ -186,7 +230,7 @@ class AddFilesToOutputTask extends DefaultTask {
             logger.info("Field found ${relativePath}: ${value} ${field.name}")
         }
 
-        classNode.interfaces.each {intfName ->
+        classNode.interfaces.each { intfName ->
             def value = intfName.replace('/', '.')
             importedClasses.add(value)
             logger.info("Interfaces found ${relativePath}: ${value}")
@@ -207,7 +251,7 @@ class AddFilesToOutputTask extends DefaultTask {
             if (!importedClasses.contains(outerClass)) {
                 logger.info("Outer class found ${relativePath}: ${outerClass}")
 
-                //def classes = findClassFiles(outerClass)
+// TODO:                def classes = findClassFiles(outerClass)
                 importedClasses.addAll(outerClass)
             }
         }
@@ -217,9 +261,9 @@ class AddFilesToOutputTask extends DefaultTask {
         }
 
         return importedClasses.findAll { className ->
-            !isExcludedClass(className) &&
-                    !isExcluded(new File(className.replace('.', '/') + ".class"))
-        }
+            !isExcludedClass(className.toString()) &&
+                    !isExcluded(new File(className.toString().replace('.', '/') + ".class"))
+        } as Set<String>
     }
 
     protected static void collectOuterClasses(ClassNode classNode, Closure closure) {
@@ -257,18 +301,19 @@ class AddFilesToOutputTask extends DefaultTask {
     }
 
     protected void processOutputFiles(Set<ResolutionResult> resolvedFiles) {
-        Set<File> jarsInClasspath = classpath.get().files.findAll { it.name.endsWith('.jar') }
         Set<String> usedClasses = resolvedFiles.collect { it.file.name.replace('.class', '').replace('/', '.') }
 
-        jarsInClasspath.each { jarFile ->
-            ZipFile zipFile = new ZipFile(jarFile)
-            zipFile.entries().each { entry ->
-                if (usedClasses.contains(entry.name.replace('.class', '').replace('/', '.'))) {
-                    outputFiles.get().from(jarFile)
-                    return
-                }
+        logger.debug("----- Used classes found ${usedClasses.join(",")}")
+
+        Set<File> jarsInClasspath = classpath.get().files.findAll { it.name.endsWith('.jar') }.findAll { jarFile ->
+            def usedJar
+            try (ZipFile zipFile = new ZipFile(jarFile)) {
+                usedJar = zipFile.entries().any { entry -> usedClasses.contains(entry.name.replace('.class', '').replace('/', '.')) }
             }
+            usedJar
         }
+
+        jarsInClasspath.each { outputJars.from(it) }
 
         outputDirs.each { dir ->
             resolvedFiles.each { result ->
@@ -283,5 +328,68 @@ class AddFilesToOutputTask extends DefaultTask {
                 }
             }
         }
+    }
+
+    /**
+     * Builds a map of canonical class names to classpath entries.
+     * @return a Map of canonical class names to the classpath entry (File)
+     */
+    private Map<String, File> buildClassMap() {
+        Map<String, File> classMap = [:]
+
+        classpath.get().each { File entry ->
+            if (entry.directory) {
+                entry.eachFileRecurse { File file ->
+                    if (file.name.endsWith('.class')) {
+                        String className = getClassNameFromFile(entry, file)
+                        classMap[className] = entry
+                    }
+                }
+            } else if (entry.name.endsWith('.jar')) {
+                try(ZipFile zipFile = new ZipFile(entry)) {
+                    zipFile.entries().each { zipEntry ->
+                        if (zipEntry.name.endsWith('.class')) {
+                            String className = getClassNameFromZipEntry(zipEntry.name)
+                            classMap[className] = entry
+                        }
+                    }
+                }
+            }
+        }
+
+        return classMap
+    }
+
+    /**
+     * Derives the canonical class name from a .class file within a directory.
+     * @param rootDir the root directory of the classpath entry
+     * @param classFile the .class file
+     * @return the canonical class name
+     */
+    protected static String getClassNameFromFile(File rootDir, File classFile) {
+        String relativePath = classFile.absolutePath - rootDir.absolutePath - File.separator
+        return relativePath.replace(File.separator, '.').replaceAll(/\.class$/, '')
+    }
+
+    /**
+     * Derives the canonical class name from a .class file within a ZIP (JAR) entry.
+     * @param entryName the name of the ZIP entry
+     * @return the canonical class name
+     */
+    protected static String getClassNameFromZipEntry(String entryName) {
+        return entryName.replace('/', '.').replaceAll(/\.class$/, '')
+    }
+
+    /**
+     * Saves the classMap to a file in JSON format.
+     * @param classMap the map of class names to classpath entries
+     * @param file the file to save the map to
+     */
+    protected static void saveClassMapToFile(Map<String, File> classMap, File file) {
+        // Convert the map to a JSON-like string representation
+        String jsonContent = JsonOutput.toJson(classMap.collectEntries { key, value -> [key, value.absolutePath] })
+
+        // Write the JSON content to the file
+        file.text = JsonOutput.prettyPrint(jsonContent)
     }
 }
