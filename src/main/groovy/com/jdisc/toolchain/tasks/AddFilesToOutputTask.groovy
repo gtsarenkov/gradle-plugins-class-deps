@@ -72,7 +72,6 @@ class AddFilesToOutputTask extends DefaultTask {
     @OutputDirectories
     final ConfigurableFileCollection outputDirs = project.objects.fileCollection()
 
-//    @OutputFiles
     @Internal
     final ConfigurableFileCollection outputJars = project.objects.fileCollection()
 
@@ -103,9 +102,9 @@ class AddFilesToOutputTask extends DefaultTask {
         missingClasspath.addAll(classpath.get().files.findAll { !isAcceptableClasspathEntry(it) })
         if (!missingClasspath.empty) {
             missingClasspath.each {
-                logger.error(MessageFormat.format("Non-existing or invalid classpath entry detected: {}", it.absolutePath))
+                logger.error(MessageFormat.format("Non-existing or invalid classpath entry detected: {0}", it.absolutePath))
             }
-            throw new GradleException(MessageFormat.format("Non-existing or invalid classpath entry detected: {}", missingClasspath.findAll { true }.absolutePath))
+            throw new GradleException(MessageFormat.format("Non-existing or invalid classpath entry detected: {0}", missingClasspath.findAll { true }.absolutePath))
         }
 
         Map<String, File> classMap = buildClassMap()

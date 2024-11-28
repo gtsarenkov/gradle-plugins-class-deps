@@ -64,7 +64,7 @@ tasks.register("greeting", AddFilesToOutputTask) {
         runner.withDebug(true)
         runner.forwardOutput()
         runner.withPluginClasspath()
-        runner.withArguments("--info", "greeting", "-PclasspathDir=${new File("build/classes/java/test").absolutePath};${new File("build/classes/groovy/main").absolutePath};${new File("build/classes/java/main").absolutePath}")
+        runner.withArguments("--info", "--stacktrace", "greeting", "-PclasspathDir=${new File("build/classes/java/test").absolutePath};${new File("build/classes/groovy/main").absolutePath}")
         runner.withProjectDir(projectDir)
         def result = runner.build()
 

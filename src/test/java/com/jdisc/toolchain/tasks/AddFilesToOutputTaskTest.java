@@ -17,7 +17,11 @@ import org.moxie.ant.ClassUtil;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.Function;
@@ -96,13 +100,16 @@ public class AddFilesToOutputTaskTest {
     }
 
     @Test
-    void findImportedClasses() {
+    void findImportedClasses() throws IOException {
         org.apache.tools.ant.Project mockAntProject = Mockito.mock(org.apache.tools.ant.Project.class);
         Mockito.doAnswer(logOnAntProject()).when(mockAntProject).log(Mockito.anyString(), Mockito.anyInt());
         ClassFilter classFilter = new ClassFilter(new org.moxie.ant.Logger(mockAntProject));
         Set<String> expectedDependencies = this.expectedDependencies.stream().filter(classFilter::include).map(s -> s.replaceAll("^\\[L(.*?);?$", "$1").replace("/", ".")).collect(Collectors.toSet());
         expectedDependencies.add("com.gitblit.FederationClient"); // This is known difference.
-        Set<String> importedClasses = addFilesToOutputTask.findImportedClasses(probeFile);
+        Set<String> importedClasses;
+        try (InputStream is = probeFile.toURI().toURL().openStream()) {
+            importedClasses = addFilesToOutputTask.findImportedClasses(is);
+        }
         // This classes found during recursion
         importedClasses.addAll(Set.of("com.gitblit.Keys", "com.gitblit.utils.XssFilter"));
         MatcherAssert.assertThat(importedClasses, containsInAnyOrder(expectedDependencies.toArray()));
@@ -116,14 +123,17 @@ public class AddFilesToOutputTaskTest {
     }
 
     @Test
-    void resolveImportedClasses() {
+    void resolveImportedClasses() throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
         org.apache.tools.ant.Project mockAntProject = Mockito.mock(org.apache.tools.ant.Project.class);
         Mockito.doAnswer(logOnAntProject()).when(mockAntProject).log(Mockito.anyString(), Mockito.anyInt());
         ClassFilter classFilter = new ClassFilter(new org.moxie.ant.Logger(mockAntProject));
         Set<String> dependencies = expectedDependencies.stream().filter(classFilter::include).map(s -> s.replaceAll("^\\[L(.*?);?$", "$1").replace("/", ".")).filter(name -> name.startsWith("com.gitblit")).collect(Collectors.toSet());
         dependencies.add("com.gitblit.FederationClient"); // This is known difference.
         Set<File> trackedJars = new TreeSet<>();
-        Set<ResolutionResult> importedClassesResult = addFilesToOutputTask.resolveImportedClasses(new TreeSet<>(Set.of(new ResolutionResult("com.gitblit.FederationClient", new File("../build-gradled"), probeFile, "com/gitblit/FederationClient"))), trackedJars);
+        Method method = AddFilesToOutputTask.class.getDeclaredMethod("buildClassMap");
+        method.setAccessible(true);
+        Map<String, File> classMap =  (Map<String, File> ) method.invoke(addFilesToOutputTask);
+        Set<ResolutionResult> importedClassesResult = addFilesToOutputTask.resolveImportedClasses(new TreeSet<>(Set.of(new ResolutionResult("com.gitblit.FederationClient", new File("../build-gradled"), probeFile, "com/gitblit/FederationClient"))), trackedJars, classMap);
         Set<String> importedClasses = importedClassesResult.stream().map(ResolutionResult::getCanonicalClassName).collect(Collectors.toSet());
 //        if (!importedClasses.equals(dependencies)) {
 //            Set<String> union = new TreeSet(importedClasses);
