@@ -219,6 +219,15 @@ class AddFilesToOutputTask extends DefaultTask {
                 if (instruction instanceof MethodInsnNode) {
                     def value = instruction.owner.replace('/', '.')
                     importedClasses.add(value)
+                    MethodInsnNode methodInsnNode = (MethodInsnNode) instruction
+                    // Use ASM Type to parse parameter types from the descriptor
+                    Type[] argumentTypes = Type.getArgumentTypes(methodInsnNode.desc)
+
+                    // Collect each argument type's class name
+                    argumentTypes.each { argType ->
+                        String className = argType.className
+                        importedClasses.add(className)
+                    }
                     logger.info("Method instruction found ${relativePath}: ${value} ${instruction.owner}.${instruction.name}")
                 } else if (instruction instanceof FieldInsnNode) {
                     def value = Type.getType(instruction.desc).className.replace('/', '.')
